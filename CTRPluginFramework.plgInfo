@@ -9,12 +9,13 @@ Targets: # Low TitleId of games which are compatibles with this plugin (0 for al
 
 Title: AzaharPing
 
-Summary: Ping to your Azahar multiplayer room
+Summary: Latency to the other players of a local match
 
 Description: |
-  Shows the round-trip time to your Azahar multiplayer
-  room on the top screen. Press Select to set the room
-  address once. Runs only inside the Azahar emulator.
+  Shows, on the top screen, the latency to the other
+  players of a local-wireless match, read from the game's
+  own packets (Pia and PRUDP v1). No setup, nothing needed
+  on the other consoles. Runs only inside Azahar.
 
 Compatibility: Citra
 
