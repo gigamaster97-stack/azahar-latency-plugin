@@ -1,0 +1,4 @@
+Build/
+*.elf
+*.3gx
+*.lst

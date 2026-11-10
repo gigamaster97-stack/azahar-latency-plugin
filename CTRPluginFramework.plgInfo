@@ -1,0 +1,23 @@
+Author: AzaharPing contributors
+
+Version: # Plugin version
+    Major: 1
+    Minor: 0
+    Revision: 0
+
+Targets: # Low TitleId of games which are compatibles with this plugin (0 for all)
+
+Title: AzaharPing
+
+Summary: Ping to your Azahar multiplayer room
+
+Description: |
+  Shows the round-trip time to your Azahar multiplayer
+  room on the top screen. Press Select to set the room
+  address once. Runs only inside the Azahar emulator.
+
+Compatibility: Citra
+
+MemorySize: 5MiB
+
+UsePrivateMemory: false
