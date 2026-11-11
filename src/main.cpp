@@ -456,6 +456,27 @@ Color PingColor(int v) {
     return Color(255, 70, 70);
 }
 
+// Colore di ogni giocatore secondo il suo NODO (scelta dell'utente, la stessa di 3DS Link): 1 azzurro (l'host), 2 verde, 3 giallo, 4 arancione,
+// 5 rosso, 6 viola, 7 bianco, 8 fucsia. Il nome del giocatore ha il colore del suo nodo, il valore quello della scala della latenza.
+Color NodeColor(int node) {
+    static const Color c[8] = {Color(70, 178, 255), Color(74, 218, 128), Color(255, 198, 88), Color(255, 140, 56),
+                               Color(255, 72, 72),  Color(186, 140, 255), Color(255, 255, 255), Color(255, 90, 210)};
+    return c[(node >= 1 && node <= 8 ? node : 1) - 1];
+}
+
+// Un nome troppo lungo si taglia come i messaggi della chat di 3DS Link: i primi 9 caratteri e "..." (12 al massimo), senza lasciare
+// uno spazio prima dei puntini. Nel log il nome resta intero.
+std::string CutName(const std::string& s) {
+    if (s.size() <= 12) {
+        return s;
+    }
+    std::string cut = s.substr(0, 9);
+    while (!cut.empty() && cut.back() == ' ') {
+        cut.pop_back();
+    }
+    return cut + "...";
+}
+
 // Millisecondi dell'orologio dell'HOST (tempo reale, non influenzato dalla velocita' dell'emulazione); se manca, il tick del guest.
 u64 HostMs() {
     s64 ns = 0;
@@ -553,6 +574,8 @@ bool DrawPing(const Screen& scr) {
 
     std::string lines[8];
     Color line_color[8];
+    std::string part_name[8], part_val[8]; // la riga divisa: nome (colore del nodo) e valore (colore della scala)
+    int line_node[8], line_rtt[8];
     int line_count = 0;
     if (in_match) {
         // nomi: se piu' giocatori mostrati hanno lo stesso nome (in Kirby i salvataggi copiati danno "Kami-pc" a tutti) si
@@ -578,6 +601,7 @@ bool DrawPing(const Screen& scr) {
                 label = same > 1 ? std::string(nm) + "#" + std::to_string(p.node) : std::string(nm);
             }
             (void)shown_count;
+            label = CutName(label);
             if (p.node == 1) {
                 label = "(H)" + label; // il nodo 1 e' chi ospita la partita
             }
@@ -592,7 +616,12 @@ bool DrawPing(const Screen& scr) {
                 std::snprintf(buf, sizeof(buf), "%s --", label.c_str());
                 line_color[line_count] = Color(160, 160, 160);
             }
-            lines[line_count++] = buf;
+            lines[line_count] = buf;
+            part_name[line_count] = label;
+            part_val[line_count] = lines[line_count].substr(label.size()); // (" 28ms", " (28ms)" o " --")
+            line_node[line_count] = p.node;
+            line_rtt[line_count] = p.rtt_ms;
+            ++line_count;
         }
     }
 
@@ -610,8 +639,13 @@ bool DrawPing(const Screen& scr) {
         }
     }
 
+    // Fino a 4 giocatori nella lobby (3 altri): una riga per giocatore, "Nome 28ms". Con PIU' di 4 (un gioco tipo Tetris ne tiene fino a 8) i nomi non
+    // stanno: una riga sola di quadratini attaccati, uno per ogni altro giocatore (mai il mio), ognuno del colore della sua latenza, con una H nera
+    // per l'host e sotto un rettangolino del colore del suo nodo (il colore con cui si riconosce chi e' chi). Il log ha sempre tutti i nomi.
+    const bool tiles = line_count > 3;
+    const int tile_w = 16, tile_h = 16, bar_h = 3;
     const int h = have_main ? 20 : 0, line_h = 18;
-    const int total_h = h + line_count * line_h;
+    const int total_h = h + (tiles ? tile_h + bar_h : line_count * line_h);
     const int w = static_cast<int>(OSD::GetTextWidth(true, text)) + 10;
     const int y0 = (cfg.corner & 2) ? 240 - total_h - 3 : 3;
     int x = (cfg.corner & 1) ? 400 - w - 3 : 3;
@@ -620,14 +654,28 @@ bool DrawPing(const Screen& scr) {
         scr.DrawSysfont(text, x + 6, y0 + 3, Color(0, 0, 0));
         scr.DrawSysfont(text, x + 5, y0 + 2, fg);
     }
-    for (int i = 0; i < line_count; ++i) {
-        const int lw = static_cast<int>(OSD::GetTextWidth(true, lines[i])) + 10;
-        const int lx = (cfg.corner & 1) ? 400 - lw - 3 : 3;
-        const int ly = y0 + h + i * line_h;
-        scr.DrawSysfont(lines[i], lx + 6, ly + 2, Color(0, 0, 0));
-        scr.DrawSysfont(lines[i], lx + 5, ly + 1, line_color[i]);
-    }
-    return true;
+    if (tiles) {
+        const int tx0 = (cfg.corner & 1) ? 400 - line_count * tile_w - 3 : 3;
+        const int ty = y0 + h;
+        for (int i = 0; i < line_count; ++i) {
+            const int tx = tx0 + i * tile_w;
+            scr.DrawRect(tx, ty, tile_w, tile_h, line_rtt[i] >= 0 ? PingColor(line_rtt[i]) : Color(150, 150, 160), true);
+            if (line_node[i] == 1) {
+                scr.DrawSysfont("H", tx + 4, ty - 1, Color(0, 0, 0)); // l'host
+            }
+            scr.DrawRect(tx, ty + tile_h, tile_w, bar_h, NodeColor(line_node[i]), true);
+        }
+    } else {
+        for (int i = 0; i < line_count; ++i) {
+            const int lw = static_cast<int>(OSD::GetTextWidth(true, lines[i])) + 10;
+            const int lx = (cfg.corner & 1) ? 400 - lw - 3 : 3;
+            const int ly = y0 + h + i * line_h;
+            const int nw = static_cast<int>(OSD::GetTextWidth(true, part_name[i]));
+            scr.DrawSysfont(lines[i], lx + 6, ly + 2, Color(0, 0, 0));
+            scr.DrawSysfont(part_name[i], lx + 5, ly + 1, NodeColor(line_node[i]));
+            scr.DrawSysfont(part_val[i], lx + 5 + nw, ly + 1, line_color[i]);
+        }
+    }    return true;
 }
 
 // ----------------------------------------------------------------------------------------------------------------

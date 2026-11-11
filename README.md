@@ -2,7 +2,7 @@
 
 **English summary.** A 3GX plugin for the [Azahar](https://azahar-emu.org) 3DS emulator (CTRPluginFramework, devkitARM). It shows, on the top screen, the
 **latency to the other players of a local-wireless (UDS) match**, read from the game's own packets: nothing is sent, nothing is needed on the
-other players' side, no configuration. One line per player, `(H)` marks the host (UDS node 1, whoever it is). Supported: **Pia** games
+other players' side, no configuration. With up to 4 players in the lobby, one line per other player: `(H)` marks the host (UDS node 1, whoever it is), the name has the colour of its **node** (1 light blue, 2 green, 3 yellow, 4 orange, 5 red, 6 purple, 7 white, 8 fuchsia - the same colours as 3DS Link's chat) and the value the colour of the latency scale; a name longer than 12 characters is cut like a chat message (`il stermi...`). With **more than 4** players (some games take 8) one row of small coloured tiles side by side, one per other player: the colour of its latency, an **H** on the host's, and a small bar under each in the colour of its node. Supported: **Pia** games
 (timer echo: Kirby Battle Royale, Monster Hunter XX / 4 Ultimate, Mario Party: Star Rush, Tri Force Heroes, Fantasy Life, Animal Crossing:
 New Leaf) and **PRUDP v1** games (ping with a stamp, PING ACKs, game clock: Final Fantasy Explorers, Pokemon X). Anything else (for example
 the encrypted PRUDP of Mario Kart 7) shows nothing; with `debug = 1` the log says which protocol it saw, with the first bytes of an unknown packet.
@@ -21,12 +21,17 @@ Licenza GPL-2.0-or-later (vedi `LICENSE`); ENet in `third_party/enet` Ã¨ MIT (
 
 ## Che cosa si vede
 
-Una riga per ogni altro giocatore connesso: `(H)` davanti al nome dell'host della partita (chiunque sia: Ã¨ il nodo 1 della
-sessione di rete, non Ã¨ fisso), poi il nome (da `nwm::UDS`, altrimenti `P1..Pn`, con `#nodo` se due nomi sono uguali) e il
-valore, per esempio `PlayerB 31ms`. Fuori da una partita non si vede niente. Solo testo, con un'ombra nera di 1 pixel.
-Colore sul valore mostrato: blu fino a 30 ms, verde 31-60, giallo 61-100, arancione 101-150, rosso oltre. Se per qualche
-secondo non arrivano campioni nuovi il valore resta, in grigio e tra parentesi.
+**Fino a 4 giocatori nella lobby** (io + 3): una riga per ogni altro giocatore connesso: `(H)` davanti al nome dell'host della partita (chiunque sia: è il
+nodo 1 della sessione di rete, non è fisso), poi il nome (da `nwm::UDS`, altrimenti `P1..Pn`, con `#nodo` se due nomi sono uguali) e il valore, per esempio
+`PlayerB 31ms`. Il **nome ha il colore del suo nodo** (1 azzurro, l'host; 2 verde; 3 giallo; 4 arancione; 5 rosso; 6 viola; 7 bianco; 8 fucsia: gli stessi
+colori della chat di 3DS Link) e il **valore quello della scala** della latenza: blu fino a 30 ms, verde 31-60, giallo 61-100, arancione 101-150, rosso oltre. Un
+nome più lungo di 12 caratteri si taglia come un messaggio della chat: i primi 9 e i puntini (`il stermi...`); nel log resta intero. Se per qualche secondo non
+arrivano campioni nuovi il valore resta, in grigio e tra parentesi.
 
+**Con PIÙ di 4 giocatori** (un gioco tipo Tetris ne tiene fino a 8) i nomi non stanno: una **riga sola di quadratini** attaccati, uno per ogni altro giocatore
+(mai il mio), ognuno del **colore della sua latenza**, con una **H** nera sul quadratino dell'host e sotto ognuno un **rettangolino del colore del suo nodo**,
+che dice chi è chi. Con 5 giocatori sono 4 quadratini, con 8 sono 7. Il log (`debug = 1`) ha sempre tutti i nomi e i valori. Fuori da una partita non si vede
+niente. Solo testo e rettangoli, con un'ombra nera di 1 pixel sul testo.
 ## Come misura
 
 Il plugin si aggancia alle funzioni `SendTo` e `PullPacket` dell'SDK di `nwm::UDS` dentro il gioco (le trova da solo) e
