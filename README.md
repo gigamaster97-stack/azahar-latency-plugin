@@ -26,7 +26,8 @@ nodo 1 della sessione di rete, non è fisso), poi il nome (da `nwm::UDS`, altrim
 `PlayerB 31ms`. Il **nome ha il colore del suo nodo** (1 azzurro, l'host; 2 verde; 3 giallo; 4 arancione; 5 rosso; 6 viola; 7 bianco; 8 fucsia: gli stessi
 colori della chat di 3DS Link) e il **valore quello della scala** della latenza: blu fino a 30 ms, verde 31-60, giallo 61-100, arancione 101-150, rosso oltre. Un
 nome più lungo di 12 caratteri si taglia come un messaggio della chat: i primi 9 e i puntini (`il stermi...`); nel log resta intero. Se per qualche secondo non
-arrivano campioni nuovi il valore resta, in grigio e tra parentesi.
+arrivano campioni nuovi il valore resta, in grigio e tra parentesi. Il valore e' la mediana degli ultimi 30 s, stabile per costruzione; se gli ultimi 2 s
+sono chiaramente peggiori (almeno 1,5 volte la mediana e 30 ms sopra) si mostra il valore di quei 2 s con un `!` accanto (`Kamisama 480ms!`), finche' dura.
 
 **Con PIÙ di 4 giocatori** (un gioco tipo Tetris ne tiene fino a 8) i nomi non stanno: una **riga sola di quadratini** attaccati, uno per ogni altro giocatore
 (mai il mio), ognuno del **colore della sua latenza**, con una **H** nera sul quadratino dell'host e sotto ognuno un **rettangolino del colore del suo nodo**,
@@ -39,7 +40,7 @@ Il plugin si aggancia alle funzioni `SendTo` e `PullPacket` dell'SDK di `nwm::UD
 riconosce dai byte, non da una lista di giochi; il log (con `debug = 1`) dice quale ha riconosciuto:
 
 ```
-protocol: Pia (Pia=17036 PRUDPv1=0 other=3451) | unknown S size=140: 02 01 01 FF ...
+protocol: Pia (Pia=17036 PRUDPv1=0 AckTag=0 Tekken=0 SSF4=0 other=3451) | unknown S size=140: 02 01 01 FF ...
 ```
 
 * **Pia** (fino alla 5.10; Kirby, Monster Hunter XX, Tri Force Heroes, Fantasy Life, Monster Hunter 4 Ultimate, Animal
@@ -49,6 +50,17 @@ protocol: Pia (Pia=17036 PRUDPv1=0 other=3451) | unknown S size=140: 02 01 01 FF
   mette nei pacchetti di stato (~15 al secondo per collegamento): ritardo di un verso = mio orologio all'arrivo meno il
   suo orologio nel pacchetto, mediana su 8 s, giro mostrato = 2 Ã— ritardo di un verso. Funziona giÃ  dalla lobby e anche
   tra due client. Dove manca l'orologio si ripiega sull'eco del ping verso l'host (ogni ~2 s) e sulle conferme.
+* **Tetris** (EUR; provato tra tre istanze): uno strato suo con le lettere `ack` nell'intestazione: ogni messaggio affidabile e' confermato da un ACK
+  di ogni altro nodo con lo stesso numero. Giro = il mio messaggio parte -> arriva l'ACK di quel nodo, meno l'attesa dell'altro gioco (stimata con la
+  mia, 25 ms finche' non ne ho misurate tre). Un messaggio rimandato non da' campioni. Pochi campioni (2-3 ogni 2 minuti): il valore arriva piano.
+* **Tekken 3D Prime Edition** (EUR; provato contro una console vera): uno strato suo (`02 01 | nodi | 01 00 | lunghezza | 8 zeri | 11 11 | tipo`): i 60
+  frame al secondo da 281 byte non hanno eco; ogni 2 s ciascuno manda una richiesta corta (tipo 0xC4, 0xC0 in lobby) e l'altro risponde subito (0x94 /
+  0x90). Giro = richiesta -> risposta, un campione ogni 2 s.
+* **Super Street Fighter IV 3D Edition** (EUR; provato tra due istanze con il ritardo vero noto, 33,4 ms: mostra 32; e contro una console vera via
+  stanza pubblica: 66 ms): ogni messaggio comincia con `u16 dimensione-2, u16 dimensione-4, u8 tipo, u8 flag, u32 numero, u32 checksum`. Tipo 0 i dati di
+  gioco (nessun eco), tipo 7 un keepalive al secondo con il suo numero al byte 22 (rimandato ogni ~110 ms finche' non confermato), tipo 3 l'ACK da 28
+  byte con quel numero al byte 20, mandato appena l'altro gioco guarda la rete (0-30 ms). Giro = keepalive -> ACK, meno l'attesa dell'altro gioco,
+  stimata con la mia (16 ms all'inizio). Un keepalive rimandato non da' campioni. Un campione al secondo.
 * **Sconosciuto**: niente valori. Nel log restano la riga `protocol:` con i primi byte di un pacchetto sconosciuto, per
   analizzarlo (con `uds_trace = 1` anche un CSV di tutti i pacchetti).
 

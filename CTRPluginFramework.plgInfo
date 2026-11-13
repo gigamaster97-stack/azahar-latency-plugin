@@ -3,7 +3,7 @@ Author: AzaharPing contributors
 Version: # Plugin version
     Major: 1
     Minor: 0
-    Revision: 1
+    Revision: 2
 
 Targets: # Low TitleId of games which are compatibles with this plugin (0 for all)
 
@@ -14,7 +14,8 @@ Summary: Latency to the other players of a local match
 Description: |
   Shows, on the top screen, the latency to the other
   players of a local-wireless match, read from the game's
-  own packets (Pia and PRUDP v1). No setup, nothing needed
+  own packets (Pia, PRUDP v1, Tetris, Tekken, Street
+  Fighter IV). No setup, nothing needed
   on the other consoles. Runs only inside Azahar.
 
 Compatibility: Citra

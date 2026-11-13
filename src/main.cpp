@@ -417,8 +417,8 @@ void NetThread(void*) {
                 pb[0] = 0;
                 for (int i = 0; i < 8 && len < 120; ++i) {
                     if (nr[i].age_ms >= 0) {
-                        len += std::snprintf(pb + len, sizeof(pb) - len, "n%d=%dms(%d)%s owd=%d ", nr[i].node, nr[i].rtt_ms,
-                                             nr[i].samples, nr[i].estimated ? "est" : "", nr[i].owd_ms);
+                        len += std::snprintf(pb + len, sizeof(pb) - len, "n%d=%dms(%d)%s%s owd=%d ", nr[i].node, nr[i].rtt_ms,
+                                             nr[i].samples, nr[i].estimated ? "est" : "", nr[i].spike ? "!" : "", nr[i].owd_ms); // "!" = gli ultimi 2 s, non la finestra
                     }
                 }
                 if (len > 0) {
@@ -610,7 +610,7 @@ bool DrawPing(const Screen& scr) {
                 std::snprintf(buf, sizeof(buf), "%s (%dms)", label.c_str(), p.rtt_ms); // tra parentesi (e grigio) = ultimo valore noto, non piu' misurato. Il carattere "~" manca nel font del 3DS e si vede come un quadratino
                 line_color[line_count] = Color(150, 150, 160);
             } else if (p.rtt_ms >= 0) {
-                std::snprintf(buf, sizeof(buf), "%s %dms", label.c_str(), p.rtt_ms);
+                std::snprintf(buf, sizeof(buf), "%s %dms%s", label.c_str(), p.rtt_ms, p.spike ? "!" : ""); // "!" = gli ultimi 2 s, chiaramente peggiori della finestra
                 line_color[line_count] = PingColor(p.rtt_ms);
             } else {
                 std::snprintf(buf, sizeof(buf), "%s --", label.c_str());

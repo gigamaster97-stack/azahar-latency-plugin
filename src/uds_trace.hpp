@@ -30,7 +30,11 @@ unsigned UdsTraceDropped();                 // record persi perche' l'anello era
 // (comprende la cadenza dei frame del gioco da entrambe le parti: oltre al ritardo di rete c'e' di norma 15-35 ms).
 struct NodeRtt {
     int node = 0;       // numero di nodo UDS (1 = host)
-    int rtt_ms = -1;    // mediana dei campioni degli ultimi 15 s; -1 se non ce ne sono
+    int rtt_ms = -1;    // quello che si mostra: la mediana della finestra (30 s; 120 s nei giochi con pochi campioni) oppure, mentre gli ultimi 2 s sono
+                        // chiaramente peggiori (spike), il valore di quei 2 s; -1 se non ce ne sono
+    int window_ms = -1; // la mediana della finestra da sola
+    int recent_ms = -1; // il valore degli ultimi 2 s da solo (-1 = nessun campione)
+    bool spike = false; // rtt_ms e' recent_ms: gli ultimi 2 s sono almeno 1,5 volte la finestra e 30 ms sopra (la connessione e' appena peggiorata)
     int min_ms = -1;    // il piu' basso
     int last_ms = -1;   // l'ultimo
     int age_ms = -1;    // da quanto e' l'ultimo campione

@@ -422,7 +422,11 @@ struct NodeStat {
     u64 last_rx_us = 0; // ultimo pacchetto del gioco ricevuto da questo nodo (qualunque, anche senza eco)
     bool slow = false;  // campioni rari (PRUDP: pochi dati affidabili da confermare): la mediana usa una finestra piu' lunga
 };
-constexpr u64 kSlowWindowUs = 120ULL * 1000000ULL;
+constexpr u64 kSlowWindowUs = 30ULL * 1000000ULL; // (era 120 s: troppo lunga da seguire; la stessa degli altri giochi, 2026-11-13)
+// La mediana della finestra e' stabile per costruzione: un peggioramento di pochi secondi non la muove. Percio' gli ultimi 2 s si guardano da soli e, quando
+// sono chiaramente peggiori della finestra (almeno una volta e mezza E 30 ms sopra), si mostra QUEL valore finche' dura (richiesta dell'utente, 2026-11-13).
+constexpr u64 kRecentUs = 2ULL * 1000000ULL;
+constexpr int kSpikeMinMs = 30;
 // Un nodo da cui non arriva piu' nulla da questo tempo ha lasciato la partita: la sua riga sparisce subito e i campioni
 // vecchi si scartano (i pacchetti di stato arrivano ~30 volte al secondo; la mediana su 30 s resta per la stabilita').
 constexpr u64 kAliveUs = 3ULL * 1000000ULL;
@@ -563,9 +567,9 @@ inline u32 Le32(const u8* p) {
     return static_cast<u32>(p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24));
 }
 
-u32 CurrentHoldUs() {
+u32 CurrentHoldUs(u32 default_us = kDefaultHoldUs) {
     if (g_hold_count < 3) {
-        return kDefaultHoldUs;
+        return default_us;
     }
     u32 v[16];
     for (int i = 0; i < g_hold_count; ++i) v[i] = g_hold_us[i];
@@ -712,10 +716,221 @@ void FeedPrudp(const Rec& r) {
     }
 }
 
+// ---- The three layers below are the same code as 3DS Link's latency module (Sources/azl/latency.cpp of the 3DSlatency branch): one sample = AddSample.
+// ---- "ack" layer (Tetris, EUR - the game of Hudson Soft that takes up to 8 players): neither Pia nor PRUDP. Found on a capture of three instances (2026-11-12);
+// every packet has this header (all words little endian):
+//   0  u32 destination node (0xFFFFFFFF = everybody)        4  u32 0        8  u16 0x0080        10 u16 the packet's own size
+//   12 u16 X, u8 counter of the packets this console sent (any kind), u8 0   16 u32 1     20 u32 sender node     24 u32 destination again
+//   28 u8 TYPE, then the three letters "ack"                32 u32 length of what follows from byte 20
+//   36 u16 msg, 38 u16 node   (msg = the number of a reliable message, 0 = unreliable; node = the node that SENT the message)
+// TYPE 0 = DATA (every size: 108, 124, 132, 224 ...; broadcast), 1 = the heartbeat every second (52 bytes, broadcast), 6 = ACK (52 bytes, to the sender of the
+// data, with the SAME msg and node), 2 = a big transfer, 4 and 5 = rare control. A reliable DATA is answered by an ACK from EVERY other node, which leaves when
+// the other game next looks at its network (measured: 17-34 ms after the data arrived, a frame at 30 fps). So the round trip with a node is
+// "my DATA left" -> "the ACK of that node arrived", minus the time the other game held it - like the PRUDP acknowledgements, estimated with MY OWN hold (my game
+// holds its ACKs the same way: measured here from the arrival of a node's reliable DATA to the departure of my ACK).
+// Checked on three instances on one PC (the same bytes seen leaving one and arriving at another give the real delay): see NOTE_LATENCY.md.
+constexpr u32 kAckDefaultHoldUs = 25000; // until three holds of my own are measured: between the 18 and the 34 ms seen
+
+inline bool IsAckLayer(const Rec& r) {
+    return r.len >= 40 && r.data[29] == 'a' && r.data[30] == 'c' && r.data[31] == 'k' && Le32(r.data + 4) == 0 && Le32(r.data + 16) == 1 &&
+           static_cast<u32>(Le16(r.data + 10)) == r.size;
+}
+
+struct AckTx {
+    u64 t_us;
+    u16 seq;
+    u8 used;
+    u8 dup; // sent again: its acknowledgements say nothing about this send
+};
+AckTx g_ack_tx[32];
+int g_ack_tx_head = 0;
+u16 g_ack_me = 0; // my node, from the sender field of what I send
+
+void FeedAck(const Rec& r) {
+    const u8 ty = r.data[28];
+    const u16 msg = Le16(r.data + 36);
+    const u16 node = Le16(r.data + 38);
+    if (r.dir == 'S') {
+        const u32 me = Le32(r.data + 20);
+        if (me >= 1 && me <= 8) {
+            g_ack_me = static_cast<u16>(me);
+        }
+        if (ty == 0 && msg != 0) { // a reliable message of mine: the acknowledgements will name it
+            for (int i = 0; i < 32; ++i) {
+                if (g_ack_tx[i].used && g_ack_tx[i].seq == msg && r.t_us - g_ack_tx[i].t_us < 5000000ULL) {
+                    g_ack_tx[i].dup = 1;
+                    return;
+                }
+            }
+            g_ack_tx[g_ack_tx_head] = {r.t_us, msg, 1, 0};
+            g_ack_tx_head = (g_ack_tx_head + 1) % 32;
+        } else if (ty == 6) { // my acknowledgement of a message of a node: how long my game held it
+            const u64 t_rx = PendTakeT(g_p_rx, node <= 255 ? static_cast<u8>(node) : 0, msg);
+            if (t_rx != 0 && r.t_us > t_rx && r.t_us - t_rx < 500000ULL) {
+                g_hold_us[g_hold_head] = static_cast<u32>(r.t_us - t_rx);
+                g_hold_head = (g_hold_head + 1) % 16;
+                if (g_hold_count < 16) ++g_hold_count;
+            }
+        }
+        return;
+    }
+    if (r.node < 1 || r.node > 8) {
+        return;
+    }
+    TouchNode(r.node, r.t_us);
+    if (ty == 0 && msg != 0) { // a reliable message of the node: I will acknowledge it
+        PendPut(g_p_rx, &g_p_rx_head, r.node, msg, r.t_us);
+    } else if (ty == 6 && g_ack_me != 0 && node == g_ack_me) { // the node acknowledges a message of mine
+        for (int i = 0; i < 32; ++i) {
+            const AckTx& s = g_ack_tx[i];
+            if (s.used && s.seq == msg) {
+                if (!s.dup && r.t_us > s.t_us && r.t_us - s.t_us < 3000000ULL) {
+                    const u32 raw = static_cast<u32>(r.t_us - s.t_us);
+                    const u32 hold = CurrentHoldUs(kAckDefaultHoldUs);
+                    AddSample(r.node, r.t_us, raw > hold ? raw - hold : 0);
+                }
+                break;
+            }
+        }
+    }
+}
+
+// ---- Tekken 3D Prime Edition (EUR): its own layer, neither Pia nor PRUDP. Found on a capture of an Azahar host against a real console (2026-11-12): every packet is
+//   0  u8 0x02, u8 0x01   2  u8 sender node, u8 destination node   4  u16 1   6  u16 length of what follows the 16-byte header (so size = 16 + length)
+//   8  8 zero bytes       16 u8 0x11, u8 0x11   18 u8 TYPE   19 u8 0   then the content
+// The game state goes in packets of 281 bytes (one a frame, 60 a second, a frame counter at bytes 25-26 - no echo of the other side's counter: nothing to measure there)
+// and every 2 s each side sends a SHORT packet (30 bytes in the match, 34 in the lobby) of TYPE 0xC4 / 0xC0 - a request - which the other game answers at once with a
+// short packet of TYPE 0x94 / 0x90 (it measured 33 ms against the 281-byte frames' 60 a second, 16-50 ms). Round trip = my request leaving -> the reply of that node arriving.
+// It includes the wait for the other game's next frame, like the other protocols' values. One sample every 2 s a node (the slow window of 120 s).
+constexpr u32 kTekkenShortMax = 40; // the requests and replies are short (30, 34); the frames are 281, the other data 73-389
+
+inline bool IsTekken(const Rec& r) {
+    return r.len >= 24 && r.data[0] == 0x02 && r.data[1] == 0x01 && r.data[16] == 0x11 && r.data[17] == 0x11 && Le16(r.data + 6) + 16u == r.size;
+}
+
+u64 g_tk_req[9]; // when my last request to each node left (0 = none waiting)
+
+void FeedTekken(const Rec& r) {
+    const bool small = r.size <= kTekkenShortMax;
+    const u8 type = r.data[18];
+    if (r.dir == 'S') {
+        const u8 dst = r.data[3];
+        if (small && (type & 0xF0) == 0xC0 && dst >= 1 && dst <= 8) {
+            g_tk_req[dst] = r.t_us;
+        }
+        return;
+    }
+    if (r.node < 1 || r.node > 8) {
+        return;
+    }
+    TouchNode(r.node, r.t_us); // (every packet of the node: it is listed even before a value)
+    if (small && (type & 0xF0) == 0x90) {
+        const u64 t_req = g_tk_req[r.node];
+        if (t_req != 0 && r.t_us > t_req && r.t_us - t_req < 1000000ULL) {
+            g_tk_req[r.node] = 0;
+            AddSample(r.node, r.t_us, static_cast<u32>(r.t_us - t_req));
+        }
+    }
+}
+
+// ---- Super Street Fighter IV 3D Edition (EUR): its own layer, neither Pia nor PRUDP. Found on two captures (2026-11-12/13): two Azahar instances on one PC (the real
+// delay known) and an instance against a real console through a public room. Every message starts with
+//   0  u16 size - 2    2  u16 size - 4    4  u8 TYPE    5  u8 flags (0x00 or 0xFF)    6  u32 the sender's packet number    10 u32 a checksum    14 ... the content
+// (a packet now and then carries several messages and does not match: it is counted as unknown, which the lock allows). TYPE 0 = the game's data (60 a second:
+// inputs and state; the equal values on the two sides come from both simulating the same frame - no echo there), 3 = ACK, 7 = a KEEPALIVE once a second,
+// with the number of the keepalive it acknowledges (u16 at 20) and ITS OWN number (u16 at 22), sent again every ~110 ms until acknowledged. The other game
+// answers a keepalive AT ONCE with an ACK (28 bytes, flags 0) carrying that number at 20 - when it next looks at its network: 0-30 ms later, a frame at 60 fps.
+// Round trip = my keepalive leaving -> the ACK with its number arriving, minus the other game's hold, estimated with MY OWN hold (from the arrival of a keepalive
+// of the node to the departure of my ACK of it), like the Tetris layer. A keepalive sent again gives no sample (which send does the ACK answer?). Measured on the
+// two instances: 49.9 ms seen, my hold 16.7 ms, the real round trip 33.4 ms. One sample a second a node (the slow window of 120 s).
+constexpr u32 kSf4DefaultHoldUs = 16000; // until three holds of my own are measured: a frame at 60 fps
+constexpr u32 kSf4AckMax = 32;           // the ACK of a keepalive is 28 bytes; the bigger ACKs (flags 0xFF) answer other things
+
+inline bool IsSf4(const Rec& r) {
+    return r.len >= 24 && static_cast<u32>(Le16(r.data)) + 2u == r.size && static_cast<u32>(Le16(r.data + 2)) + 4u == r.size && r.data[4] <= 0x0F &&
+           (r.data[5] == 0x00 || r.data[5] == 0xFF);
+}
+
+struct Sf4Tx {
+    u64 t_us;
+    u16 seq;
+    u8 used;
+    u8 dup;
+};
+struct Sf4Rx {
+    u64 t_us;
+    u16 seq;
+    u8 used;
+};
+Sf4Tx g_sf_tx[8]; // my keepalives waiting for their ACK (one a second: 8 is plenty)
+Sf4Rx g_sf_rx[8]; // keepalives of the other game waiting for my ACK (my hold)
+int g_sf_tx_head = 0, g_sf_rx_head = 0;
+
+void FeedSf4(const Rec& r) {
+    const u8 type = r.data[4];
+    if (r.data[5] != 0x00) {
+        if (r.dir == 'R' && r.node >= 1 && r.node <= 8) {
+            TouchNode(r.node, r.t_us);
+        }
+        return;
+    }
+    if (r.dir == 'S') {
+        if (type == 7) { // my keepalive: its own number at 22
+            const u16 seq = Le16(r.data + 22);
+            for (int i = 0; i < 8; ++i) {
+                if (g_sf_tx[i].used && g_sf_tx[i].seq == seq && r.t_us - g_sf_tx[i].t_us < 5000000ULL) {
+                    g_sf_tx[i].dup = 1; // sent again
+                    return;
+                }
+            }
+            g_sf_tx[g_sf_tx_head] = {r.t_us, seq, 1, 0};
+            g_sf_tx_head = (g_sf_tx_head + 1) % 8;
+        } else if (type == 3 && r.size <= kSf4AckMax) { // my ACK of a keepalive of the other game: how long my game held it
+            const u16 seq = Le16(r.data + 20);
+            for (int i = 0; i < 8; ++i) {
+                Sf4Rx& x = g_sf_rx[i];
+                if (x.used && x.seq == seq) {
+                    x.used = 0;
+                    if (r.t_us > x.t_us && r.t_us - x.t_us < 500000ULL) {
+                        g_hold_us[g_hold_head] = static_cast<u32>(r.t_us - x.t_us);
+                        g_hold_head = (g_hold_head + 1) % 16;
+                        if (g_hold_count < 16) ++g_hold_count;
+                    }
+                    break;
+                }
+            }
+        }
+        return;
+    }
+    if (r.node < 1 || r.node > 8) {
+        return;
+    }
+    TouchNode(r.node, r.t_us); // (every packet of the node: it is listed even before a value)
+    if (type == 7) { // a keepalive of the node: I will acknowledge it
+        g_sf_rx[g_sf_rx_head] = {r.t_us, Le16(r.data + 22), 1};
+        g_sf_rx_head = (g_sf_rx_head + 1) % 8;
+    } else if (type == 3 && r.size <= kSf4AckMax) { // the node acknowledges a keepalive of mine
+        const u16 seq = Le16(r.data + 20);
+        for (int i = 0; i < 8; ++i) {
+            Sf4Tx& s = g_sf_tx[i];
+            if (s.used && s.seq == seq) {
+                s.used = 0;
+                if (!s.dup && r.t_us > s.t_us && r.t_us - s.t_us < 3000000ULL) {
+                    const u32 raw = static_cast<u32>(r.t_us - s.t_us);
+                    const u32 hold = CurrentHoldUs(kSf4DefaultHoldUs);
+                    AddSample(r.node, r.t_us, raw > hold ? raw - hold : 0);
+                }
+                break;
+            }
+        }
+    }
+}
+
 // Riconoscimento del protocollo, solo per il log (UdsProtoSummary): conta i pacchetti di ogni tipo e tiene i primi byte di un
 // pacchetto non riconosciuto per mandata e per ricezione, cosi' si puo' analizzare un gioco nuovo anche da un log mandato da altri.
 struct ProtoStat {
     u32 pia, prudp, other;
+    u32 ack, tk, sf;     // gli strati di Tetris, Tekken, Street Fighter IV
     u8 smp[2][24];       // primi byte del primo pacchetto sconosciuto: 0 = mandato, 1 = ricevuto
     u8 smp_len[2];
     u32 smp_size[2];
@@ -728,6 +943,12 @@ void ClassifyProto(const Rec& r) {
         ++g_proto.pia;
     } else if (FindPrudp(r) >= 0) {
         ++g_proto.prudp;
+    } else if (IsAckLayer(r)) {
+        ++g_proto.ack;
+    } else if (IsTekken(r)) {
+        ++g_proto.tk;
+    } else if (IsSf4(r)) {
+        ++g_proto.sf;
     } else {
         ++g_proto.other;
         const int k = r.dir == 'S' ? 0 : 1;
@@ -743,7 +964,15 @@ void Feed(const Rec& r) {
     ClassifyProto(r);
     const int mo = FindMagic(r);
     if (mo < 0) {
-        FeedPrudp(r);
+        if (FindPrudp(r) >= 0) {
+            FeedPrudp(r);
+        } else if (IsAckLayer(r)) {
+            FeedAck(r);
+        } else if (IsTekken(r)) {
+            FeedTekken(r);
+        } else if (IsSf4(r)) {
+            FeedSf4(r);
+        }
         return;
     }
     const u16 ts = Be16(r.data + mo + 8);
@@ -880,8 +1109,30 @@ int UdsRttSnapshot(NodeRtt out[8]) {
                 v[j + 1] = x;
             }
             o.rtt_ms = static_cast<int>(v[c / 2] / 1000);
+            o.window_ms = o.rtt_ms;
             o.min_ms = static_cast<int>(lowest / 1000);
             o.samples = c;
+            u32 r[kSamples]; // gli ultimi 2 s da soli (kRecentUs): mostrati al posto della finestra finche' sono chiaramente peggiori
+            int rc = 0;
+            for (int i = 0; i < n.count; ++i) {
+                if (now - n.s[i].t_us <= kRecentUs) r[rc++] = n.s[i].rtt_us;
+            }
+            if (rc > 0) {
+                for (int i = 1; i < rc; ++i) {
+                    const u32 x = r[i];
+                    int j = i - 1;
+                    while (j >= 0 && r[j] > x) {
+                        r[j + 1] = r[j];
+                        --j;
+                    }
+                    r[j + 1] = x;
+                }
+                o.recent_ms = static_cast<int>(r[rc / 2] / 1000);
+                if (o.recent_ms >= o.window_ms + kSpikeMinMs && o.recent_ms * 2 >= o.window_ms * 3) {
+                    o.spike = true;
+                    o.rtt_ms = o.recent_ms;
+                }
+            }
         } else if (o.age_ms >= 0 && n.count > 0) {
             // Nessun campione recente ma il nodo e' ancora connesso (FF Explorers: un client manda dati affidabili solo quando entra,
             // dopo non c'e' piu' niente da abbinare). Si mostra l'ultimo valore noto, segnato come vecchio.
@@ -935,6 +1186,7 @@ int UdsRttSnapshot(NodeRtt out[8]) {
             if (o.rtt_ms < 1) o.rtt_ms = 1;
             o.stale = false;
             o.estimated = true;
+            o.spike = false; // (la finestra di 8 s dell'orologio di gioco segue da sola un cambiamento)
         }
     }
     LightLock_Unlock(&g_est_lock);
@@ -942,19 +1194,24 @@ int UdsRttSnapshot(NodeRtt out[8]) {
 }
 
 int UdsProtoSummary(char* buf, int cap) {
-    const u32 total = g_proto.pia + g_proto.prudp + g_proto.other;
+    const u32 total = g_proto.pia + g_proto.prudp + g_proto.ack + g_proto.tk + g_proto.sf + g_proto.other;
     if (total == 0 || total == g_proto.logged_total) {
         return 0;
     }
     g_proto.logged_total = total;
-    const char* name = "sconosciuto";
-    if (g_proto.pia > 0 && g_proto.pia >= g_proto.prudp && g_proto.pia > g_proto.other) {
-        name = "Pia";
-    } else if (g_proto.prudp > 0 && g_proto.prudp > g_proto.pia && g_proto.prudp > g_proto.other) {
-        name = "PRUDP v1";
+    // il nome: il tipo con piu' pacchetti, se ne ha piu' di quelli sconosciuti
+    static const char* const kNames[5] = {"Pia", "PRUDP v1", "AckTag", "Tekken", "SSF4"};
+    const u32 c[5] = {g_proto.pia, g_proto.prudp, g_proto.ack, g_proto.tk, g_proto.sf};
+    int best = 0;
+    for (int k = 1; k < 5; ++k) {
+        if (c[k] > c[best]) {
+            best = k;
+        }
     }
-    int len = std::snprintf(buf, cap, "protocol: %s (Pia=%u PRUDPv1=%u other=%u)", name, static_cast<unsigned>(g_proto.pia),
-                            static_cast<unsigned>(g_proto.prudp), static_cast<unsigned>(g_proto.other));
+    const char* name = c[best] > 0 && c[best] > g_proto.other ? kNames[best] : "sconosciuto";
+    int len = std::snprintf(buf, cap, "protocol: %s (Pia=%u PRUDPv1=%u AckTag=%u Tekken=%u SSF4=%u other=%u)", name, static_cast<unsigned>(g_proto.pia),
+                            static_cast<unsigned>(g_proto.prudp), static_cast<unsigned>(g_proto.ack), static_cast<unsigned>(g_proto.tk),
+                            static_cast<unsigned>(g_proto.sf), static_cast<unsigned>(g_proto.other));
     for (int k = 0; k < 2 && g_proto.other > 0; ++k) {
         if (g_proto.smp_len[k] == 0 || len >= cap - 80) {
             continue;
